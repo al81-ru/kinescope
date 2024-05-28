@@ -3,10 +3,8 @@ package al81.stuff;
 import al81.stuff.misc.ReqHeaderConfigReader;
 import al81.stuff.parsers.HtmlPlayerParser;
 import al81.stuff.parsers.MpdParser;
-import org.xml.sax.SAXException;
+import al81.stuff.providers.SavedPageProvider;
 
-import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.xpath.XPathExpressionException;
 import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -22,7 +20,9 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.*;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.zip.GZIPInputStream;
 
@@ -40,7 +40,7 @@ public class App {
 
 
 
-    public static void main(String[] args) throws IOException, URISyntaxException, InterruptedException, XPathExpressionException, ParserConfigurationException, SAXException, ExecutionException, TimeoutException {
+    public static void main(String[] args) throws Exception {
         Properties properties = getAppProperties();
         ReqHeaderConfigReader reqHeaderConfigReader;
 
@@ -55,16 +55,34 @@ public class App {
             reqHeaderConfigReader = ReqHeaderConfigReader.loadReader(reqHeadersPath);
         }
 
+        App app = new App(properties, reqHeaderConfigReader);
+
+
+        //TODO command line params
+
+        // direct url processing
+        /*
         if (args.length == 0) {
             System.out.println("Specify embed player url");
             System.exit(1);
         }
-
-        App app = new App(properties, reqHeaderConfigReader);
-
         String prefix = args[0];
         for (int i = 1; i < args.length; i++) {
             app.process(prefix, args[i]);
+        }
+        */
+
+        // dir with saved pages
+        for (File file : new File("c:/saved_pages").listFiles((dir, name) -> name.endsWith(".htm") || name.endsWith(".html"))) {
+            String pageName = file.getName();
+            pageName = pageName.substring(0, pageName.lastIndexOf('.'));
+            System.out.println("============================\nProcessing page " + pageName);
+
+            SavedPageProvider provider = new SavedPageProvider(file);
+
+            for (String link : provider.getSources()) {
+                app.processUrl(pageName, link);
+            }
         }
     }
 
@@ -90,7 +108,7 @@ public class App {
         this.reqHeaderConfig = reqHeadersConfig;
     }
 
-    public void process( String prefix, String url) throws URISyntaxException, IOException, InterruptedException, XPathExpressionException, ParserConfigurationException, SAXException, ExecutionException, TimeoutException {
+    public void processUrl(String prefix, String url) throws Exception {
         // читаем iframe, вытаскиваем .mpd
         System.out.println("Parsing source at " + url);
 
@@ -107,16 +125,23 @@ public class App {
 
         String tmpDir = appProperties.getProperty("dirs.tmp");
 
+        Path tmpVideo = Path.of(tmpDir, "video.mp4");
+        Path tmpAudio = Path.of(tmpDir, "audio.mp4");
+
         System.out.println("Transferring video data...");
-        makeRequestWithHeadersAndSaveFile(mpdData.videoUrl(), "mp4", Path.of(tmpDir, "video.mp4"));
+        saveFileMultipart("mp4", mpdData.videoUrls(), tmpVideo);
+
         System.out.println("Transferring audio data...");
-        makeRequestWithHeadersAndSaveFile(mpdData.audioUrl(), "mp4", Path.of(tmpDir, "audio.mp4"));
+        saveFileMultipart("mp4", mpdData.audioUrls(), tmpAudio);
+
 
         String ffDir = appProperties.getProperty("dirs.ffmpeg");
         String exe = Path.of(ffDir, "ffmpeg").toString();
 
         Path finalName = Path.of(appProperties.getProperty("dirs.output"), prefix, playerParser.title() + ".mkv");
         Files.createDirectories(finalName.getParent());
+
+        Files.deleteIfExists(finalName);
 
         System.out.println("Starting ffmpeg...");
         ProcessBuilder builder = new ProcessBuilder();
@@ -132,10 +157,19 @@ public class App {
         future.get(10, TimeUnit.SECONDS);
 
         System.out.println("Cleanup...");
-        Files.delete(Path.of(tmpDir, "video.mp4"));
-        Files.delete(Path.of(tmpDir, "audio.mp4"));
+        Files.delete(tmpVideo);
+        Files.delete(tmpAudio);
 
         System.out.println("Done");
+    }
+
+    public void saveFileMultipart(String headerSection, List<String> urls, Path filename) throws URISyntaxException, IOException, InterruptedException {
+        int cc = 1;
+        for (String videoUrl : urls) {
+            System.out.println("  segment " + cc + " of " + urls.size() + " ...");
+            makeRequestWithHeadersAndSaveFile(videoUrl, headerSection, filename, cc > 1);
+            cc++;
+        }
     }
 
 
@@ -147,11 +181,12 @@ public class App {
         }
     }
 
-    public void makeRequestWithHeadersAndSaveFile(String url, String headerSection, Path fileName) throws URISyntaxException, IOException, InterruptedException {
-        try(InputStream is = makeRequestWithHeaders(url, headerSection);FileOutputStream fos = new FileOutputStream(fileName.toFile())) {
+    public void makeRequestWithHeadersAndSaveFile(String url, String headerSection, Path fileName, boolean append) throws URISyntaxException, IOException, InterruptedException {
+        try(InputStream is = makeRequestWithHeaders(url, headerSection);FileOutputStream fos = new FileOutputStream(fileName.toFile(), append)) {
             FileChannel fileChannel = fos.getChannel();
             ReadableByteChannel readableByteChannel = Channels.newChannel(is);
-            fileChannel.transferFrom(readableByteChannel, 0, Long.MAX_VALUE);
+            //fileChannel.position(fileChannel.size());
+            fileChannel.transferFrom(readableByteChannel, fileChannel.position(), Long.MAX_VALUE);
         }
     }
 

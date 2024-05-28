@@ -15,10 +15,16 @@ import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
 import java.io.IOException;
 import java.io.StringReader;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.IntStream;
 
-public record MpdParser(String videoUrl, String videoRange, String audioUrl, String audioRange) {
+public record MpdParser(List<String> videoUrls, List<String> audioUrls) {
     public static MpdParser parseXml(String xmlBody) throws ParserConfigurationException, IOException, SAXException, XPathExpressionException {
-        String videoUrl = null, videoRange = null, audioUrl = null, audioRange = null;
+        List<String> videoUrls = null;
+        List<String> audioUrls = null;
 
         DocumentBuilderFactory builderFactory = DocumentBuilderFactory.newInstance();
         DocumentBuilder builder = builderFactory.newDocumentBuilder();
@@ -39,23 +45,48 @@ public record MpdParser(String videoUrl, String videoRange, String audioUrl, Str
                 throw new RuntimeException("Presentation not found");
             }
 
-            Node urlNode = (Node) xPath.compile("SegmentList/Initialization").evaluate(presentation, XPathConstants.NODE);
-            videoUrl = urlNode.getAttributes().getNamedItem("sourceURL").getNodeValue();
-            videoRange = urlNode.getAttributes().getNamedItem("range").getNodeValue();
+            videoUrls = getRepresentationSegmentUrls(xPath, presentation);
         }
 
 
-        expression = "/MPD/Period/AdaptationSet[@mimeType='audio/mp4']/Representation/SegmentList/Initialization";
-        Node audio = (Node) xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE);
-        if (audio != null)
+        expression = "/MPD/Period/AdaptationSet[@mimeType='audio/mp4']/Representation";
+        Node audioPresentation = (Node) xPath.compile(expression).evaluate(xmlDocument, XPathConstants.NODE);
+        if (audioPresentation != null)
         {
-            audioUrl = audio.getAttributes().getNamedItem("sourceURL").getNodeValue();
-            audioRange = audio.getAttributes().getNamedItem("range").getNodeValue();
+            audioUrls = getRepresentationSegmentUrls(xPath, audioPresentation);
         }
         else {
             System.out.println("Audio not found");
         }
 
-        return new MpdParser(videoUrl, videoRange, audioUrl, audioRange);
+        return new MpdParser(videoUrls, audioUrls);
+    }
+
+    private static List<String> getRepresentationSegmentUrls(XPath xPath, Node representationNode) throws XPathExpressionException {
+        List<String> urls = new ArrayList<>();
+        Set<String> keys = new HashSet<>();
+
+        Node initNode = (Node) xPath.compile("SegmentList/Initialization").evaluate(representationNode, XPathConstants.NODE);
+        if (initNode != null) {
+            urls.add(initNode.getAttributes().getNamedItem("sourceURL").getNodeValue());
+        }
+
+        NodeList nodes = (NodeList) xPath.compile("SegmentList/SegmentURL").evaluate(representationNode, XPathConstants.NODESET);
+        IntStream.range(0, nodes.getLength()).mapToObj(nodes::item)
+                .map(node -> node.getAttributes().getNamedItem("media").getNodeValue()).distinct().forEach(urls::add);
+
+        List<String> res = new ArrayList<>();
+
+        for (String val : urls) {
+            String key = val.substring(0, val.indexOf('?'));
+            if (keys.contains(key)) {
+                continue;
+            }
+
+            keys.add(key);
+            res.add(val);
+        }
+
+        return res;
     }
 }
